@@ -1,13 +1,16 @@
-﻿using Com.Ctrip.Framework.Apollo.Logging;
+﻿using Com.Ctrip.Framework.Apollo.ConfigAdapter;
+using Com.Ctrip.Framework.Apollo.Logging;
 using System;
 
 namespace Apollo.ConfigurationManager.Demo
 {
-    class Program
+    internal class Program
     {
         private static void Main()
         {
-            LogManager.Provider = new ConsoleLoggerProvider(LogLevel.Trace);
+            LogManager.UseConsoleLogging(LogLevel.Trace);
+
+            YamlConfigAdapter.Register();
 
             var demo = new ConfigurationManagerDemo();
 

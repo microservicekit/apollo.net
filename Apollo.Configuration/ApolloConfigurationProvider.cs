@@ -3,45 +3,45 @@ using Com.Ctrip.Framework.Apollo.Internals;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Com.Ctrip.Framework.Apollo
 {
     public class ApolloConfigurationProvider : ConfigurationProvider, IRepositoryChangeListener, IConfigurationSource
     {
-        private readonly string _sectionKey;
-        private readonly IConfigRepository _configRepository;
-        private readonly Task _initializeTask;
+        internal string? SectionKey { get; }
+        internal IConfigRepository ConfigRepository { get; }
+        private Task? _initializeTask;
 
-        public ApolloConfigurationProvider(string sectionKey, IConfigRepository configRepository)
+        public ApolloConfigurationProvider(string? sectionKey, IConfigRepository configRepository)
         {
-            _sectionKey = sectionKey;
-            _configRepository = configRepository;
-            _initializeTask = _configRepository.Initialize();
+            SectionKey = sectionKey;
+            ConfigRepository = configRepository;
+            ConfigRepository.AddChangeListener(this);
+            _initializeTask = ConfigRepository.Initialize();
         }
 
         public override void Load()
         {
-            _initializeTask.ConfigureAwait(false).GetAwaiter().GetResult();
+            Interlocked.Exchange(ref _initializeTask, null)?.ConfigureAwait(false).GetAwaiter().GetResult();
 
-            _configRepository.AddChangeListener(this);
-
-            SetData(_configRepository.GetConfig());
+            SetData(ConfigRepository.GetConfig());
         }
 
-        private void SetData(Properties properties)
+        protected virtual void SetData(Properties properties)
         {
-            if (string.IsNullOrEmpty(_sectionKey) || properties.Source == null || properties.Source.Count == 0)
-                Data = properties.Source;
-            else
+            var data = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in properties.GetPropertyNames())
             {
-                var data = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-                foreach (var kv in properties.Source)
-                    data[$"{_sectionKey}{ConfigurationPath.KeyDelimiter}{kv.Key}"] = kv.Value;
-
-                Data = data;
+                if (string.IsNullOrEmpty(SectionKey))
+                    data[key] = properties.GetProperty(key) ?? string.Empty;
+                else
+                    data[$"{SectionKey}{ConfigurationPath.KeyDelimiter}{key}"] = properties.GetProperty(key) ?? string.Empty;
             }
+
+            Data = data;
         }
 
         void IRepositoryChangeListener.OnRepositoryChange(string namespaceName, Properties newProperties)

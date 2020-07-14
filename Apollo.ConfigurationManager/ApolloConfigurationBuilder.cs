@@ -13,18 +13,15 @@ namespace Com.Ctrip.Framework.Apollo
     {
         private static readonly object Lock = new object();
 
-        private IConfig _config;
-        public IReadOnlyList<string> Namespaces { get; private set; }
-        public string SectionName { get; private set; }
+        private IConfig? _config;
+        public IReadOnlyList<string>? Namespaces { get; private set; }
+        public string? SectionName { get; private set; }
 
         public override void Initialize(string name, NameValueCollection config)
         {
             Namespaces = config["namespace"]?.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
 
-            if (!(this is AppSettingsSectionBuilder))
-            {
-                var unused = ConfigurationManager.AppSettings; //让AppSettings必须最先被初始化
-            }
+            if (!(this is AppSettingsSectionBuilder)) _ = ConfigurationManager.AppSettings; //让AppSettings必须最先被初始化
 
             base.Initialize(name, config);
         }
@@ -48,12 +45,17 @@ namespace Com.Ctrip.Framework.Apollo
 
                 Task<IConfig> config;
                 if (Namespaces == null || Namespaces.Count == 0)
+#pragma warning disable 618
                     config = ApolloConfigurationManager.GetAppConfig();
+#pragma warning restore 618
                 else if (Namespaces.Count == 1)
+#pragma warning disable 618
                     config = ApolloConfigurationManager.GetConfig(Namespaces[0]);
+#pragma warning restore 618
                 else
+#pragma warning disable 618
                     config = ApolloConfigurationManager.GetConfig(Namespaces);
-
+#pragma warning restore 618
                 _config = config.ConfigureAwait(false).GetAwaiter().GetResult();
 
                 _config.ConfigChanged += Config_ConfigChanged;
@@ -62,6 +64,6 @@ namespace Com.Ctrip.Framework.Apollo
             return _config;
         }
 
-        private void Config_ConfigChanged(object sender, ConfigChangeEventArgs args) => ConfigurationManager.RefreshSection(SectionName);
+        private void Config_ConfigChanged(IConfig config, ConfigChangeEventArgs args) => ConfigurationManager.RefreshSection(SectionName);
     }
 }

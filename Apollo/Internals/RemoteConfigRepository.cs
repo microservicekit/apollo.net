@@ -1,5 +1,4 @@
-﻿using Apollo.Core.Utils;
-using Com.Ctrip.Framework.Apollo.Core.Dto;
+﻿using Com.Ctrip.Framework.Apollo.Core.Dto;
 using Com.Ctrip.Framework.Apollo.Core.Utils;
 using Com.Ctrip.Framework.Apollo.Exceptions;
 using Com.Ctrip.Framework.Apollo.Logging;
@@ -10,6 +9,8 @@ using Newtonsoft.Json.Serialization;
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,7 +18,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 {
     public class RemoteConfigRepository : AbstractConfigRepository
     {
-        private static readonly ILogger Logger = LogManager.CreateLogger(typeof(RemoteConfigRepository));
+        private static readonly Func<Action<LogLevel, string, Exception?>> Logger = () => LogManager.CreateLogger(typeof(RemoteConfigRepository));
         private static readonly TaskFactory ExecutorService = new TaskFactory(new LimitedConcurrencyLevelTaskScheduler(5));
 
         private readonly ConfigServiceLocator _serviceLocator;
@@ -25,10 +26,10 @@ namespace Com.Ctrip.Framework.Apollo.Internals
         private readonly IApolloOptions _options;
         private readonly RemoteConfigLongPollService _remoteConfigLongPollService;
 
-        private volatile ThreadSafe.AtomicReference<ApolloConfig> _configCache = new ThreadSafe.AtomicReference<ApolloConfig>(null);
-        private readonly ThreadSafe.AtomicReference<ServiceDto> _longPollServiceDto = new ThreadSafe.AtomicReference<ServiceDto>(null);
-        private readonly ThreadSafe.AtomicReference<ApolloNotificationMessages> _remoteMessages = new ThreadSafe.AtomicReference<ApolloNotificationMessages>(null);
-        private Exception _syncException;
+        private volatile ApolloConfig? _configCache;
+        private volatile ServiceDto? _longPollServiceDto;
+        private volatile ApolloNotificationMessages? _remoteMessages;
+        private ExceptionDispatchInfo? _syncException;
         private readonly Timer _timer;
 
         public RemoteConfigRepository(string @namespace,
@@ -51,15 +52,14 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             _timer.Change(_options.RefreshInterval, _options.RefreshInterval);
 
-            ScheduleLongPollingRefresh();
+            _remoteConfigLongPollService.Submit(Namespace, this);
         }
 
         public override Properties GetConfig()
         {
-            if (_syncException != null)
-                throw _syncException;
+            _syncException?.Throw();
 
-            return TransformApolloConfigToProperties(_configCache.ReadFullFence());
+            return TransformApolloConfigToProperties(_configCache!);
         }
 
         private async void SchedulePeriodicRefresh(object _) => await SchedulePeriodicRefresh(false).ConfigureAwait(false);
@@ -68,35 +68,34 @@ namespace Com.Ctrip.Framework.Apollo.Internals
         {
             try
             {
-                Logger.Debug($"refresh config for namespace: {Namespace}");
+                Logger().Debug($"refresh config for namespace: {Namespace}");
 
                 await Sync(isFirst).ConfigureAwait(false);
-
-                _syncException = null;
             }
             catch (Exception ex)
             {
-                _syncException = ex;
+                _syncException = ExceptionDispatchInfo.Capture(ex);
 
-                Logger.Warn($"refresh config error for namespace: {Namespace}", ex);
+                Logger().Warn($"refresh config error for namespace: {Namespace}", ex);
             }
         }
 
         private async Task Sync(bool isFirst)
         {
-            var previous = _configCache.ReadFullFence();
+            var previous = _configCache;
             var current = await LoadApolloConfig(isFirst).ConfigureAwait(false);
 
             //reference equals means HTTP 304
             if (!ReferenceEquals(previous, current))
             {
-                Logger.Debug("Remote Config refreshed!");
-                _configCache.WriteFullFence(current);
+                Logger().Debug("Remote Config refreshed!");
+                _configCache = current;
+                _syncException = null;
                 FireRepositoryChange(Namespace, GetConfig());
             }
         }
 
-        private async Task<ApolloConfig> LoadApolloConfig(bool isFirst)
+        private async Task<ApolloConfig?> LoadApolloConfig(bool isFirst)
         {
             var appId = _options.AppId;
             var cluster = _options.Cluster;
@@ -104,25 +103,27 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             var configServices = await _serviceLocator.GetConfigServices().ConfigureAwait(false);
 
-            Exception exception = null;
-            string url = null;
+            Exception? exception = null;
+            Uri? url = null;
 
             var notFound = false;
             for (var i = 0; i < (isFirst ? 1 : 2); i++)
             {
                 IList<ServiceDto> randomConfigServices = new List<ServiceDto>(configServices);
                 randomConfigServices.Shuffle();
+
                 //Access the server which notifies the client first
-                if (_longPollServiceDto.ReadFullFence() != null)
+                var longPollServiceDto = Interlocked.Exchange(ref _longPollServiceDto, null);
+                if (longPollServiceDto != null)
                 {
-                    randomConfigServices.Insert(0, _longPollServiceDto.AtomicExchange(null));
+                    randomConfigServices.Insert(0, longPollServiceDto);
                 }
 
                 foreach (var configService in randomConfigServices)
                 {
-                    url = AssembleQueryConfigUrl(configService.HomepageUrl, appId, cluster, Namespace, dataCenter, _remoteMessages.ReadFullFence(), _configCache.ReadFullFence());
+                    url = AssembleQueryConfigUrl(configService.HomepageUrl, appId, cluster, Namespace, dataCenter, _remoteMessages!, _configCache!);
 
-                    Logger.Debug($"Loading config from {url}");
+                    Logger().Debug($"Loading config from {url}");
 
                     try
                     {
@@ -130,13 +131,13 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
                         if (response.StatusCode == HttpStatusCode.NotModified)
                         {
-                            Logger.Debug("Config server responds with 304 HTTP status code.");
-                            return _configCache.ReadFullFence();
+                            Logger().Debug("Config server responds with 304 HTTP status code.");
+                            return _configCache!;
                         }
 
                         var result = response.Body;
 
-                        Logger.Debug(
+                        Logger().Debug(
                             $"Loaded config for {Namespace}: {result?.Configurations?.Count ?? 0}");
 
                         return result;
@@ -153,17 +154,20 @@ namespace Com.Ctrip.Framework.Apollo.Internals
                             statusCodeException = new ApolloConfigStatusCodeException(ex.StatusCode, message);
                         }
 
-                        Logger.Warn(statusCodeException);
+                        Logger().Warn(statusCodeException);
                         exception = statusCodeException;
                     }
                     catch (Exception ex)
                     {
-                        Logger.Warn(ex);
+                        Logger().Warn(ex);
                         exception = ex;
                     }
                 }
-
-                await Task.Delay(1000).ConfigureAwait(false); //sleep 1 second
+#if NET40
+                await TaskEx.Delay(1000).ConfigureAwait(false);
+#else
+                await Task.Delay(1000).ConfigureAwait(false);
+#endif
             }
 
             if (notFound)
@@ -171,14 +175,14 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             var fallbackMessage = $"Load Apollo Config failed - appId: {appId}, cluster: {cluster}, namespace: {Namespace}, url: {url}";
 
-            throw new ApolloConfigException(fallbackMessage, exception);
+            throw new ApolloConfigException(fallbackMessage, exception!);
         }
 
-        private string AssembleQueryConfigUrl(string uri,
+        private Uri AssembleQueryConfigUrl(string uri,
             string appId,
             string cluster,
-            string namespaceName,
-            string dataCenter,
+            string? namespaceName,
+            string? dataCenter,
             ApolloNotificationMessages remoteMessages,
             ApolloConfig previousConfig)
         {
@@ -198,7 +202,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             if (!string.IsNullOrEmpty(dataCenter))
             {
-                query["dataCenter"] = dataCenter;
+                query["dataCenter"] = dataCenter!;
             }
 
             var localIp = _options.LocalIp;
@@ -214,7 +218,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             uriBuilder.Query = QueryUtils.Build(query);
 
-            return uriBuilder.ToString();
+            return uriBuilder.Uri;
         }
 
         private static readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings
@@ -228,15 +232,10 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             return apolloConfig == null ? new Properties() : new Properties(apolloConfig.Configurations);
         }
 
-        private void ScheduleLongPollingRefresh()
-        {
-            _remoteConfigLongPollService.Submit(Namespace, this);
-        }
-
         public void OnLongPollNotified(ServiceDto longPollNotifiedServiceDto, ApolloNotificationMessages remoteMessages)
         {
-            _longPollServiceDto.WriteFullFence(longPollNotifiedServiceDto);
-            _remoteMessages.WriteFullFence(remoteMessages);
+            _longPollServiceDto = longPollNotifiedServiceDto;
+            _remoteMessages = remoteMessages;
 
             ExecutorService.StartNew(async () =>
             {
@@ -246,12 +245,12 @@ namespace Com.Ctrip.Framework.Apollo.Internals
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn($"Sync config failed, will retry. Repository {GetType()}, reason: {ex.GetDetailMessage()}");
+                    Logger().Warn($"Sync config failed, will retry. Repository {GetType()}, reason: {ex.GetDetailMessage()}");
                 }
             });
         }
 
-        bool _disposed;
+        private bool _disposed;
         protected override void Dispose(bool disposing)
         {
             if (_disposed)
@@ -259,6 +258,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
             if (disposing)
             {
+                _timer.Dispose();
             }
 
             //释放非托管资源
@@ -267,3 +267,49 @@ namespace Com.Ctrip.Framework.Apollo.Internals
         }
     }
 }
+#if NET40
+namespace System.Runtime.ExceptionServices
+{
+    internal sealed class ExceptionDispatchInfo
+    {
+        private readonly object _source;
+        private readonly string _stackTrace;
+
+        private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        private static readonly FieldInfo RemoteStackTrace = typeof(Exception).GetField("_remoteStackTraceString", PrivateInstance);
+        private static readonly FieldInfo Source = typeof(Exception).GetField("_source", PrivateInstance);
+        private static readonly MethodInfo InternalPreserveStackTrace = typeof(Exception).GetMethod("InternalPreserveStackTrace", PrivateInstance);
+
+        private ExceptionDispatchInfo(Exception source)
+        {
+            SourceException = source;
+            _stackTrace = SourceException.StackTrace + Environment.NewLine;
+            _source = Source.GetValue(SourceException);
+        }
+
+        public Exception SourceException { get; }
+
+        public static ExceptionDispatchInfo Capture(Exception source)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+
+            return new ExceptionDispatchInfo(source);
+        }
+
+        public void Throw()
+        {
+            try
+            {
+                throw SourceException;
+            }
+            catch
+            {
+                InternalPreserveStackTrace.Invoke(SourceException, new object[0]);
+                RemoteStackTrace.SetValue(SourceException, _stackTrace);
+                Source.SetValue(SourceException, _source);
+                throw;
+            }
+        }
+    }
+}
+#endif

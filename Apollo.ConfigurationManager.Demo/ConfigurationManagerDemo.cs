@@ -1,30 +1,30 @@
 ﻿using Com.Ctrip.Framework.Apollo;
+using Com.Ctrip.Framework.Apollo.Core;
 using Com.Ctrip.Framework.Apollo.Model;
 using System;
 
 namespace Apollo.ConfigurationManager.Demo
 {
-    class ConfigurationManagerDemo
+    internal class ConfigurationManagerDemo
     {
-        private string DEFAULT_VALUE = "undefined";
-        private IConfig config;
-        private IConfig anotherConfig;
+        private readonly string DEFAULT_VALUE = "undefined";
+        private readonly IConfig config;
 
         public ConfigurationManagerDemo()
         {
-            config = ApolloConfigurationManager.GetAppConfig().Result;
-            anotherConfig = ApolloConfigurationManager.GetConfig("TEST1.test").Result;
+#pragma warning disable 618
+            config = ApolloConfigurationManager.GetConfig(ConfigConsts.NamespaceApplication + ".json",
+#pragma warning restore 618
+                ConfigConsts.NamespaceApplication + ".xml",
+                ConfigConsts.NamespaceApplication + ".yml",
+                ConfigConsts.NamespaceApplication + ".yaml",
+                ConfigConsts.NamespaceApplication).GetAwaiter().GetResult();
             config.ConfigChanged += OnChanged;
-            anotherConfig.ConfigChanged += OnChanged;
         }
 
         public string GetConfig(string key)
         {
-            string result = config.GetProperty(key, DEFAULT_VALUE);
-            if (result.Equals(DEFAULT_VALUE))
-            {
-                result = anotherConfig.GetProperty(key, DEFAULT_VALUE);
-            }
+            var result = config.GetProperty(key, DEFAULT_VALUE);
             var color = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine("Loading key: {0} with value: {1}", key, result);
@@ -35,11 +35,10 @@ namespace Apollo.ConfigurationManager.Demo
 
         private void OnChanged(object sender, ConfigChangeEventArgs changeEvent)
         {
-            Console.WriteLine("Changes for namespace {0}", changeEvent.Namespace);
-            foreach (var change in changeEvent.Changes)
+            foreach (var (key, value) in changeEvent.Changes)
             {
                 Console.WriteLine("Change - key: {0}, oldValue: {1}, newValue: {2}, changeType: {3}",
-                    change.Value.PropertyName, change.Value.OldValue, change.Value.NewValue, change.Value.ChangeType);
+                    value.PropertyName, value.OldValue, value.NewValue, value.ChangeType);
             }
         }
     }

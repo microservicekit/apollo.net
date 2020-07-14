@@ -1,5 +1,6 @@
 ﻿using Com.Ctrip.Framework.Apollo.Core;
 using Com.Ctrip.Framework.Apollo.Core.Utils;
+using Com.Ctrip.Framework.Apollo.Enums;
 using Com.Ctrip.Framework.Apollo.Exceptions;
 using Com.Ctrip.Framework.Apollo.Logging;
 using Com.Ctrip.Framework.Apollo.Util;
@@ -11,21 +12,26 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 {
     public class LocalFileConfigRepository : AbstractConfigRepository, IRepositoryChangeListener
     {
-        private static readonly ILogger Logger = LogManager.CreateLogger(typeof(LocalFileConfigRepository));
+        private static readonly Func<Action<LogLevel, string, Exception?>> Logger = () => LogManager.CreateLogger(typeof(LocalFileConfigRepository));
         private const string ConfigDir = "config-cache";
 
-        private string _baseDir;
-        private volatile Properties _fileProperties;
+        private string? _baseDir;
+        private volatile Properties? _fileProperties;
 
         private readonly IApolloOptions _options;
-        private readonly IConfigRepository _upstream;
+        private readonly IConfigRepository? _upstream;
+
+        public ConfigFileFormat Format { get; } = ConfigFileFormat.Properties;
 
         public LocalFileConfigRepository(string @namespace,
             IApolloOptions configUtil,
-            IConfigRepository upstream = null) : base(@namespace)
+            IConfigRepository? upstream = null) : base(@namespace)
         {
             _upstream = upstream;
             _options = configUtil;
+
+            var ext = Path.GetExtension(@namespace);
+            if (ext != null && ext.Length > 1 && Enum.TryParse(ext.Substring(1), true, out ConfigFileFormat format)) Format = format;
 
             PrepareConfigCacheDir();
         }
@@ -39,9 +45,10 @@ namespace Com.Ctrip.Framework.Apollo.Internals
                 _upstream.AddChangeListener(this);
 
                 //sync with upstream immediately
-                if (TrySyncFromUpstream())
-                    return;
+                if (TrySyncFromUpstream()) return;
             }
+
+            if (_baseDir == null) return;
 
             try
             {
@@ -49,13 +56,28 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             }
             catch (Exception ex)
             {
-                Logger.Warn(ex);
+                Logger().Warn(ex);
             }
         }
 
-        public override Properties GetConfig() => new Properties(_fileProperties);
+        public override Properties GetConfig()
+        {
+            var properties = _fileProperties == null ? new Properties() : new Properties(_fileProperties);
 
-        bool _disposed;
+            if (Format == ConfigFileFormat.Properties || !ConfigAdapterRegister.TryGetAdapter(Format, out var adapter))
+                return properties;
+
+            try
+            {
+                return adapter.GetProperties(properties);
+            }
+            catch (Exception ex)
+            {
+                throw new ApolloConfigException($"Config Error! AppId: {_options.AppId}, Namespace: {Namespace}", ex);
+            }
+        }
+
+        private bool _disposed;
         protected override void Dispose(bool disposing)
         {
             if (_disposed)
@@ -73,8 +95,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
 
         private bool TrySyncFromUpstream()
         {
-            if (_upstream == null)
-                return false;
+            if (_upstream == null) return false;
 
             try
             {
@@ -86,7 +107,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             }
             catch (Exception ex)
             {
-                Logger.Warn(
+                Logger().Warn(
                     $"Sync config from upstream repository {_upstream.GetType()} failed, reason: {ex.GetDetailMessage()}");
             }
 
@@ -97,15 +118,16 @@ namespace Com.Ctrip.Framework.Apollo.Internals
         {
             UpdateFileProperties(new Properties(newProperties));
 
-            FireRepositoryChange(namespaceName, newProperties);
+            FireRepositoryChange(namespaceName, GetConfig());
         }
 
         private void UpdateFileProperties(Properties newProperties)
         {
+            if (_baseDir == null) return;
+
             lock (this)
             {
-                if (newProperties.Equals(_fileProperties))
-                    return;
+                if (newProperties.Equals(_fileProperties)) return;
 
                 _fileProperties = newProperties;
 
@@ -121,38 +143,35 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             }
 
             var file = AssembleLocalCacheFile(baseDir, namespaceName);
-            var properties = new Properties();
 
             try
             {
-                properties.Load(file);
+                var properties = _options.CacheFileProvider.Get(file);
 
-                Logger.Debug($"Loading local config file {file} successfully!");
+                Logger().Debug($"Loading local config file {file} successfully!");
+
+                return properties;
             }
             catch (Exception ex)
             {
                 throw new ApolloConfigException($"Loading config from local cache file {file} failed", ex);
             }
-
-            return properties;
         }
 
         private void PersistLocalCacheFile(string baseDir, string namespaceName)
         {
-            if (baseDir == null)
-            {
-                return;
-            }
+            var properties = _fileProperties;
+            if (baseDir == null || properties == null) return;
+
             var file = AssembleLocalCacheFile(baseDir, namespaceName);
 
             try
             {
-                _fileProperties.Store(file);
+                _options.CacheFileProvider.Save(file, properties);
             }
             catch (Exception ex)
             {
-                Logger.Warn(
-                    $"Persist local cache file {file} failed, reason: {ex.GetDetailMessage()}.", ex);
+                Logger().Warn($"Persist local cache file {file} failed, reason: {ex.GetDetailMessage()}.", ex);
             }
         }
 
@@ -164,16 +183,16 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             }
             catch (Exception ex)
             {
-                Logger.Warn(new ApolloConfigException("Prepare config cache dir failed", ex));
+                Logger().Warn(new ApolloConfigException("Prepare config cache dir failed", ex));
                 return;
             }
+
             CheckLocalConfigCacheDir(_baseDir);
         }
 
-        private void CheckLocalConfigCacheDir(string baseDir)
+        private static void CheckLocalConfigCacheDir(string baseDir)
         {
-            if (Directory.Exists(baseDir))
-                return;
+            if (Directory.Exists(baseDir)) return;
 
             try
             {
@@ -181,8 +200,7 @@ namespace Com.Ctrip.Framework.Apollo.Internals
             }
             catch (Exception ex)
             {
-                Logger.Warn(
-                    $"Unable to create local config cache directory {baseDir}, reason: {ex.GetDetailMessage()}. Will not able to cache config file.", ex);
+                Logger().Warn($"Unable to create local config cache directory {baseDir}, reason: {ex.GetDetailMessage()}. Will not able to cache config file.", ex);
             }
         }
 

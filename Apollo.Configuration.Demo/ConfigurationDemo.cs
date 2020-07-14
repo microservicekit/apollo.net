@@ -1,4 +1,5 @@
 ﻿using Com.Ctrip.Framework.Apollo;
+using Com.Ctrip.Framework.Apollo.Enums;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -7,18 +8,29 @@ using System;
 
 namespace Apollo.Configuration.Demo
 {
-    class ConfigurationDemo
+    internal class ConfigurationDemo
     {
         private static readonly IConfiguration Configuration;
         static ConfigurationDemo()
         {
             var builder = new ConfigurationBuilder();
 
-            builder.AddJsonFile("appsettings.json");
-                builder
-                .AddApollo(builder.Build().GetSection("apollo"))
+            builder.AddEnvironmentVariables();
+
+            var apollo = builder.Build().GetSection("apollo").Get<ApolloOptions>();
+
+            //apollo.HttpMessageHandlerFactory = () => new HttpClientHandler
+            //{
+            //    UseProxy = true,
+            //    Proxy = new WebProxy(new Uri("http://127.0.0.1:8888"))
+            //};
+
+            builder.AddApollo(builder.Build().GetSection("apollo"))
+                .AddDefault(ConfigFileFormat.Xml)
+                .AddDefault(ConfigFileFormat.Json)
+                .AddDefault(ConfigFileFormat.Yml)
+                .AddDefault(ConfigFileFormat.Yaml)
                 .AddDefault();
-                //.AddNamespace("TEST1.test");
 
             Configuration = builder.Build();
         }
@@ -30,15 +42,15 @@ namespace Apollo.Configuration.Demo
         public ConfigurationDemo()
         {
             config = Configuration;
-            anotherConfig = Configuration.GetSection("TEST1.test");
+            anotherConfig = Configuration.GetSection("a");
 
             var services = new ServiceCollection();
             services.AddOptions()
                 .Configure<Value>(config)
                 .Configure<Value>("other", anotherConfig);
-
+#pragma warning disable 618
             services.AddSingleton<ApolloConfigurationManager>();
-
+#pragma warning restore 618
             var serviceProvider = services.BuildServiceProvider();
 
             var optionsMonitor = serviceProvider.GetService<IOptionsMonitor<Value>>();
@@ -70,7 +82,7 @@ namespace Apollo.Configuration.Demo
 
         private class Value
         {
-            public string Timeout { get; set; }
+            public string Timeout { get; set; } = "";
         }
     }
 }
